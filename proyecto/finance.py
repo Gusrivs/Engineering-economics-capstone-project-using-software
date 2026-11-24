@@ -60,11 +60,41 @@ def add_months(start: date, months: int) -> date:
 def normalize_document(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit())
 
+def _valid_document_input(value: str, groups: tuple[int, ...]) -> bool:
+    """Accept digits and the expected optional hyphens, but never ignore letters."""
+    value = value.strip()
+    if not value or any(not (ch.isdigit() or ch == "-") for ch in value):
+        return False
+    digits = normalize_document(value)
+    if len(digits) != sum(groups):
+        return False
+    expected_parts = []
+    offset = 0
+    for size in groups:
+        expected_parts.append(digits[offset:offset + size])
+        offset += size
+    expected = "-".join(expected_parts)
+    # Permit either the plain digits or the canonical hyphenated form.
+    return "-" not in value or value == expected
+
 def valid_dui(value: str) -> bool:
-    return len(normalize_document(value)) == 9
+    return _valid_document_input(value, (8, 1))
 
 def valid_nit(value: str) -> bool:
-    return len(normalize_document(value)) == 14
+    return _valid_document_input(value, (4, 6, 3, 1))
+
+def normalize_phone(value: str) -> str:
+    return normalize_document(value)
+
+def valid_phone(value: str) -> bool:
+    value = value.strip()
+    return (all(ch.isdigit() or ch == "-" for ch in value)
+            and len(normalize_phone(value)) == 8
+            and ("-" not in value or (len(value) == 9 and value[4] == "-")))
+
+def format_phone(value: str) -> str:
+    digits = normalize_phone(value)
+    return f"{digits[:4]}-{digits[4:]}" if len(digits) == 8 else value.strip()
 
 def format_dui(value: str) -> str:
     digits = normalize_document(value)

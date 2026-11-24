@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "financiera.db"
@@ -104,13 +105,17 @@ def update_client(client_id, data):
 
 
 def create_loan(client_id, principal, annual_rate, months, method, start_date, schedule):
+    def to_cents(amount):
+        return int((Decimal(str(amount)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
     with connect() as conn:
         cursor = conn.execute("""INSERT INTO loans(client_id,principal,annual_rate,months,method,start_date,created_at)
             VALUES(?,?,?,?,?,?,?)""", (client_id, principal, annual_rate, months, method, start_date,
                                          date.today().isoformat()))
         loan_id = cursor.lastrowid
         conn.executemany("""INSERT INTO installments(loan_id,number,due_date,principal_due,interest_due)
-            VALUES(?,?,?,?,?)""", [(loan_id, r["number"], r["due_date"], r["principal"], r["interest"])
+            VALUES(?,?,?,?,?)""", [(loan_id, r["number"], r["due_date"], to_cents(r["principal"]),
+                                      to_cents(r["interest"]))
                                       for r in schedule])
         return loan_id
 

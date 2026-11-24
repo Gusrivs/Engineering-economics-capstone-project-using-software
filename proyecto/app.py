@@ -6,7 +6,8 @@ import streamlit as st
 
 import db
 from finance import (add_months, amortization_schedule, compound_interest, format_dui,
-                     format_nit, money, simple_interest, valid_dui, valid_nit)
+                     format_nit, format_phone, money, simple_interest, valid_dui,
+                     valid_nit, valid_phone)
 from receipts import make_receipt_pdf, money_text
 
 st.set_page_config(page_title="CrediGestión | Sistema financiero", page_icon="◈", layout="wide")
@@ -75,6 +76,22 @@ def cents(value):
     return int(money(value) * 100)
 
 
+def format_digit_groups(digits, groups):
+    parts = []
+    offset = 0
+    for size in groups:
+        parts.append(digits[offset:offset + size])
+        offset += size
+    return "-".join(parts)
+
+
+def sanitize_numeric_text(key, max_digits, groups):
+    """Keep only the allowed digits, cap their count, and insert the standard hyphens."""
+    raw = st.session_state.get(key, "")
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())[:max_digits]
+    st.session_state[key] = format_digit_groups(digits, groups)
+
+
 def page_header(eyebrow, title, subtitle):
     st.markdown(f'<div class="eyebrow">{eyebrow}</div><h1>{title}</h1><p class="subtle">{subtitle}</p>', unsafe_allow_html=True)
 
@@ -112,33 +129,47 @@ elif page == "Clientes":
     page_header("Cartera de personas", "Clientes", "Alta, búsqueda y actualización de información del cliente.")
     tab_new, tab_list = st.tabs(["＋ Nuevo cliente", "Directorio"])
     with tab_new:
-        with st.form("new_client", clear_on_submit=True):
+        with st.container(border=True):
+            st.session_state.setdefault("new_dui", "")
+            st.session_state.setdefault("new_nit", "")
+            st.session_state.setdefault("new_phone", "")
             col1, col2 = st.columns(2)
             with col1:
-                name = st.text_input("Nombre completo *")
-                dui = st.text_input("DUI *", placeholder="12345678-9")
-                phone = st.text_input("Teléfono *", placeholder="7000-0000")
-                income = st.number_input("Ingresos mensuales (USD) *", min_value=0.0, step=25.0)
+                name = st.text_input("Nombre completo *", key="new_name")
+                dui = st.text_input("DUI *", placeholder="12345678-9", max_chars=10,
+                                    help="10 caracteres contando el guion: 9 dígitos. No se admiten letras.", key="new_dui",
+                                    on_change=sanitize_numeric_text, args=("new_dui", 9, (8, 1)))
+                phone = st.text_input("Teléfono *", placeholder="7000-0000", max_chars=9,
+                                      help="9 caracteres contando el guion: 8 dígitos. No se admiten letras.", key="new_phone",
+                                      on_change=sanitize_numeric_text, args=("new_phone", 8, (4, 4)))
+                income = st.number_input("Ingresos mensuales (USD) *", min_value=0.0, step=1.0, key="new_income")
             with col2:
-                nit = st.text_input("NIT *", placeholder="0614-000000-000-0")
-                address = st.text_input("Dirección *")
-                profile = st.selectbox("Perfil crediticio", ["En evaluación", "Bueno", "Riesgo medio", "Riesgo alto"])
-            submitted = st.form_submit_button("Guardar cliente", type="primary")
+                nit = st.text_input("NIT *", placeholder="0614-000000-000-0", max_chars=17,
+                                    help="17 caracteres contando los guiones: 14 dígitos. No se admiten letras.", key="new_nit",
+                                    on_change=sanitize_numeric_text, args=("new_nit", 14, (4, 6, 3, 1)))
+                address = st.text_input("Dirección *", key="new_address")
+                profile = st.selectbox("Perfil crediticio", ["En evaluación", "Bueno", "Riesgo medio", "Riesgo alto"],
+                                       key="new_profile")
+            submitted = st.button("Guardar cliente", type="primary", key="submit_new_client")
         if submitted:
             if not all([name.strip(), dui.strip(), nit.strip(), phone.strip(), address.strip()]):
                 st.error("Complete todos los campos obligatorios.")
-            elif not valid_dui(dui):
-                st.error("El DUI debe contener nueve dígitos.")
-            elif not valid_nit(nit):
-                st.error("El NIT debe contener catorce dígitos.")
+            elif len(dui) != 10 or not valid_dui(dui):
+                st.error("El DUI debe tener exactamente 10 caracteres, incluyendo el guion (9 dígitos).")
+            elif len(nit) != 17 or not valid_nit(nit):
+                st.error("El NIT debe tener exactamente 17 caracteres, incluyendo los guiones (14 dígitos).")
+            elif len(phone) != 9 or not valid_phone(phone):
+                st.error("El teléfono debe tener exactamente 9 caracteres, incluyendo el guion (8 dígitos).")
             else:
                 try:
                     db.create_client({"full_name": name.strip(), "dui": format_dui(dui), "nit": format_nit(nit),
-                        "phone": phone.strip(), "address": address.strip(), "monthly_income": cents(income),
+                        "phone": format_phone(phone), "address": address.strip(), "monthly_income": cents(income),
                         "credit_profile": profile, "created_at": date.today().isoformat()})
                     st.success("Cliente guardado correctamente.")
                 except sqlite3.IntegrityError:
                     st.error("Ya existe un cliente con ese DUI o NIT.")
+                except sqlite3.Error as exc:
+                    st.error(f"No se pudo guardar el cliente: {exc}")
     with tab_list:
         search = st.text_input("Buscar por nombre o DUI", key="client_search")
         clients = db.list_clients(search)
@@ -151,32 +182,52 @@ elif page == "Clientes":
                 format_func=lambda key: client_label(client_by_id[key]), key="edit_client_select")
             chosen = client_by_id[chosen_id]
             with st.expander("Editar datos del cliente"):
-                with st.form("edit_client"):
-                    a,b = st.columns(2)
-                    with a:
-                        edit_name = st.text_input("Nombre completo", value=chosen["full_name"])
-                        edit_dui = st.text_input("DUI", value=chosen["dui"])
-                        edit_phone = st.text_input("Teléfono", value=chosen["phone"])
-                        edit_income = st.number_input("Ingresos mensuales (USD)", min_value=0.0,
-                            value=chosen["monthly_income"] / 100, step=25.0)
-                    with b:
-                        edit_nit = st.text_input("NIT", value=chosen["nit"])
-                        edit_address = st.text_input("Dirección", value=chosen["address"])
-                        profiles = ["En evaluación", "Bueno", "Riesgo medio", "Riesgo alto"]
-                        edit_profile = st.selectbox("Perfil crediticio", profiles,
-                            index=profiles.index(chosen["credit_profile"]) if chosen["credit_profile"] in profiles else 0)
-                    save_edit = st.form_submit_button("Actualizar cliente", type="primary")
+                edit_dui_key = f"edit_dui_{chosen_id}"
+                edit_nit_key = f"edit_nit_{chosen_id}"
+                edit_phone_key = f"edit_phone_{chosen_id}"
+                edit_dui_default = format_dui(chosen["dui"])
+                edit_nit_default = format_nit(chosen["nit"])
+                edit_phone_default = format_phone(chosen["phone"])
+                st.session_state.setdefault(edit_dui_key, edit_dui_default)
+                st.session_state.setdefault(edit_nit_key, edit_nit_default)
+                st.session_state.setdefault(edit_phone_key, edit_phone_default)
+                a,b = st.columns(2)
+                with a:
+                    edit_name = st.text_input("Nombre completo", value=chosen["full_name"], key=f"edit_name_{chosen_id}")
+                    edit_dui = st.text_input("DUI", placeholder="12345678-9", max_chars=10,
+                        help="10 caracteres contando el guion: 9 dígitos. No se admiten letras.", key=edit_dui_key,
+                        on_change=sanitize_numeric_text, args=(edit_dui_key, 9, (8, 1)))
+                    edit_phone = st.text_input("Teléfono", placeholder="7000-0000", max_chars=9,
+                        help="9 caracteres contando el guion: 8 dígitos. No se admiten letras.", key=edit_phone_key,
+                        on_change=sanitize_numeric_text, args=(edit_phone_key, 8, (4, 4)))
+                    edit_income = st.number_input("Ingresos mensuales (USD)", min_value=0.0,
+                        value=chosen["monthly_income"] / 100, step=1.0, key=f"edit_income_{chosen_id}")
+                with b:
+                    edit_nit = st.text_input("NIT", placeholder="0614-000000-000-0", max_chars=17,
+                        help="17 caracteres contando los guiones: 14 dígitos. No se admiten letras.", key=edit_nit_key,
+                        on_change=sanitize_numeric_text, args=(edit_nit_key, 14, (4, 6, 3, 1)))
+                    edit_address = st.text_input("Dirección", value=chosen["address"], key=f"edit_address_{chosen_id}")
+                    profiles = ["En evaluación", "Bueno", "Riesgo medio", "Riesgo alto"]
+                    edit_profile = st.selectbox("Perfil crediticio", profiles,
+                        index=profiles.index(chosen["credit_profile"]) if chosen["credit_profile"] in profiles else 0,
+                        key=f"edit_profile_{chosen_id}")
+                save_edit = st.button("Actualizar cliente", type="primary", key=f"save_edit_{chosen_id}")
                 if save_edit:
-                    if not edit_name.strip() or not edit_phone.strip() or not edit_address.strip() or not valid_dui(edit_dui) or not valid_nit(edit_nit):
-                        st.error("Revise los campos requeridos y el formato de DUI/NIT.")
+                    if (not edit_name.strip() or not edit_address.strip()
+                            or len(edit_dui) != 10 or not valid_dui(edit_dui)
+                            or len(edit_nit) != 17 or not valid_nit(edit_nit)
+                            or len(edit_phone) != 9 or not valid_phone(edit_phone)):
+                        st.error("Revise los campos: DUI (10 caracteres con guion), NIT (17 con guiones) y teléfono (9 con guion).")
                     else:
                         try:
                             db.update_client(chosen["id"], {"full_name": edit_name.strip(), "dui": format_dui(edit_dui),
-                                "nit": format_nit(edit_nit), "phone": edit_phone.strip(), "address": edit_address.strip(),
+                                "nit": format_nit(edit_nit), "phone": format_phone(edit_phone), "address": edit_address.strip(),
                                 "monthly_income": cents(edit_income), "credit_profile": edit_profile})
                             st.success("Datos actualizados.")
                         except sqlite3.IntegrityError:
                             st.error("El DUI o NIT ya pertenece a otro cliente.")
+                        except sqlite3.Error as exc:
+                            st.error(f"No se pudieron actualizar los datos: {exc}")
         else:
             st.info("No hay clientes que coincidan con la búsqueda.")
 
@@ -270,8 +321,10 @@ elif page == "Registrar pago":
         loan = loan_by_id[loan_id]
         installments = [x for x in db.list_installments(loan["id"]) if x["due_remaining"] > 0]
         if installments:
-            installment = st.selectbox("Cuota a pagar", installments, format_func=lambda x:
-                f"Cuota {x['number']} · vence {x['due_date']} · pendiente {dollars(x['due_remaining'])}")
+            installment_by_id = {x["id"]: x for x in installments}
+            installment_id = st.selectbox("Cuota a pagar", list(installment_by_id), format_func=lambda key:
+                f"Cuota {installment_by_id[key]['number']} · vence {installment_by_id[key]['due_date']} · pendiente {dollars(installment_by_id[key]['due_remaining'])}")
+            installment = installment_by_id[installment_id]
             st.caption(f"Capital pendiente: {dollars(installment['principal_remaining'])} · Interés pendiente: {dollars(installment['interest_remaining'])}")
             with st.form("payment_form"):
                 a,b,c = st.columns(3)
@@ -306,8 +359,10 @@ elif page == "Recibos":
             "DUI": x["dui"], "Crédito": f"CR-{x['loan_id']:05d}", "Cuota": x["installment_number"],
             "Total": dollars(x["amount"]), "Saldo restante": dollars(x["balance_after"])} for x in payments],
             use_container_width=True, hide_index=True)
-        selected = st.selectbox("Seleccionar recibo", payments, format_func=lambda x: f"{x['receipt_number']} · {x['full_name']} · {x['paid_at']}")
-        detail = db.payment_detail(selected["id"])
+        payment_by_id = {x["id"]: x for x in payments}
+        selected_payment_id = st.selectbox("Seleccionar recibo", list(payment_by_id),
+            format_func=lambda key: f"{payment_by_id[key]['receipt_number']} · {payment_by_id[key]['full_name']} · {payment_by_id[key]['paid_at']}")
+        detail = db.payment_detail(selected_payment_id)
         a,b,c = st.columns(3)
         a.metric("Capital", dollars(detail["principal_amount"]))
         b.metric("Interés", dollars(detail["interest_amount"]))
